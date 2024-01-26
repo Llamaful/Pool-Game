@@ -1,22 +1,29 @@
 package com.poolgame;
+
+import javax.imageio.ImageIO;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.event.*;
 import java.awt.geom.Ellipse2D;
 import java.awt.geom.Point2D;
 import java.awt.geom.RoundRectangle2D;
+import java.io.File;
 import java.util.ArrayList;
 
 public class PoolGame extends JPanel {
-  public static final Color BG_COLOR = Color.decode("0x181819");
+  public static final Color BG_COLOR = new Color(24, 24, 25);
   public static final Color shadow = new Color(10, 10, 12, 32);
   public static final Color shine = new Color(255, 255, 255, 48);
 
-  private Timer updateTimer;
-  private Timer AITimer;
-  private final int updateMS = 20;
+  private final Main main;
 
-  private final AI AI;
+  private Timer updateTimer;
+  protected Timer AITimer;
+  private final int updateMS = 20;
+  private boolean shouldStartTimer = false;
+
+  protected AI AI;
+  protected Connection connection = null;
 
   private final int screenMargin = 80;
 
@@ -26,9 +33,9 @@ public class PoolGame extends JPanel {
     game, cuing, spinMenu
   }
 
-  private boolean isSandbox = false;
-  private boolean turn = false;
-  private boolean isAIOpponent = false;
+  public boolean isSandbox = false;
+  public boolean turn = false;
+  public boolean isAIOpponent = false;
   private Boolean turn0IsSolid = null;
 
   private boolean hasScored = false;
@@ -46,36 +53,65 @@ public class PoolGame extends JPanel {
   private ArrayList<Ball> player1Balls = new ArrayList<Ball>();
   private ArrayList<Ball> player2Balls = new ArrayList<Ball>();
 
-  private final double groundFriction = 0.7;
+  private final double groundFriction = 0.5;
   private final double bounceFriction = 0.7;
+  private final double collisionFriction = 0.98;
 
   static class Vector {
     public double x, y;
+
     public Vector(double x, double y) {
       this.x = x; this.y = y;
+    }
+
+    public Vector proj(Vector onto) {
+      return onto.scale(dot(onto) / (onto.x * onto.x + onto.y * onto.y));
+    }
+
+    public double dot(Vector b) {
+      return x * b.x + y * b.y;
+    }
+
+    public Vector add(Vector b) {
+      return new Vector(x + b.x, y + b.y);
+    }
+
+    public Vector scale(double scalar) {
+      return new Vector(x * scalar, y * scalar);
     }
   }
 
   class Savestate {
-    private Gamestate _gamestate;
-    private boolean _canMoveCue = false;
-    private Ball _cue;
-    private ArrayList<Ball> _balls;
-    private boolean _turn;
-    private Boolean _turn0IsSolid;
+    public Gamestate _gamestate;
+    public boolean _canMoveCue;
+    public boolean _turn;
+    public Boolean _turn0IsSolid;
+    public ArrayList<Ball> _balls;
 
     public Savestate() {
       _gamestate = gamestate; _canMoveCue = canMoveCue;
-      _cue = cue; _balls = cloneList(balls); _turn = turn;
+      _balls = cloneList(balls); _turn = turn;
       _turn0IsSolid = turn0IsSolid;
+    }
+
+    public Savestate(Gamestate _gamestate, boolean _canMoveCue, boolean _turn, Boolean _turn0IsSolid, ArrayList<Ball> _balls) {
+      this._gamestate = _gamestate; this._canMoveCue = _canMoveCue;
+      this._turn = _turn; this._turn0IsSolid = _turn0IsSolid;
+      this._balls = _balls;
     }
 
     public void load() {
       gamestate = _gamestate; canMoveCue = _canMoveCue;
-      cue = _cue; balls = _balls; turn = _turn;
+      balls = _balls; turn = _turn;
       turn0IsSolid = _turn0IsSolid;
       cue = _balls.get(0);
       cuePoint = new Point2D.Double(cue.x, cue.y);
+    }
+
+    public Savestate invert() {
+      _turn = !_turn;
+      if (_turn0IsSolid != null) _turn0IsSolid = !_turn0IsSolid;
+      return this;
     }
 
     private ArrayList<Ball> cloneList(ArrayList<Ball> list) {
@@ -90,18 +126,25 @@ public class PoolGame extends JPanel {
   class Ball {
     public static final int defaultR = 40;
     public int R = defaultR;
-    public final double vThreshold = 8;
+    public final double vThreshold = 10;
     private final double spinRange = 1.5, spinMult = 30;
 
     public final Color color;
     public final boolean isStriped;
     public final int number;
     public double x, y, vx, vy, rotX, rotY, spinX, spinY;
-    private boolean scored;
+    protected boolean scored;
 
     public Ball(Color color, boolean isStriped, int number, int initX, int initY) {
       this.color = color; this.isStriped = isStriped; this.number = number;
       x = initX; y = initY; scored = false;
+    }
+
+    protected Ball(Color color, boolean isStriped, int number, double x, double y, double vx, double vy, double spinX, double spinY, double rotX, double rotY, boolean scored) {
+      this.color = color; this.isStriped = isStriped; this.number = number;
+      this.x = x; this.y = y; this.vx = vx; this.vy = vy;
+      this.spinX = spinX; this.spinY = spinY; this.rotX = rotX; this.rotY = rotY;
+      this.scored = scored;
     }
 
     protected Ball(Ball b) {
@@ -142,6 +185,7 @@ public class PoolGame extends JPanel {
           } else if (isWallColliding()) {
             x -= dx;
             vx *= -bounceFriction;
+            vy *= bounceFriction;
             addSpin();
           }
         }
@@ -156,6 +200,7 @@ public class PoolGame extends JPanel {
             collided = collide;
           } else if (isWallColliding()) {
             y -= dy;
+            vx *= bounceFriction;
             vy *= -bounceFriction;
             addSpin();
           }
@@ -212,28 +257,32 @@ public class PoolGame extends JPanel {
     }
 
     private void collideWith(Ball b) {
-      Vector anchoredVector = getAnchoredVector(b);
-      addSpin();
-      vx -= anchoredVector.x;
-      vy -= anchoredVector.y;
-      b.vx += anchoredVector.x;
-      b.vy += anchoredVector.y;
-      // Vector anchoredVector2 = b.getAnchoredVector(this);
-      // b.vx -= anchoredVector2.x;
-      // b.vy -= anchoredVector2.y;
-      // vx += anchoredVector2.x;
-      // vy += anchoredVector2.y;
+      // addSpin();
+
+      final Vector normal = new Vector(b.x - x, b.y - y);
+      final Vector tangent = new Vector(normal.y, -normal.x);
+
+      final Vector n = new Vector(vx, vy).proj(normal).scale(collisionFriction);
+      final Vector t = new Vector(vx, vy).proj(tangent);
+      final Vector bn = new Vector(b.vx, b.vy).proj(normal).scale(collisionFriction);
+      final Vector bt = new Vector(b.vx, b.vy).proj(tangent);
+
+      vx = t.x + bn.x;
+      vy = t.y + bn.y;
+
+      b.vx = bt.x + n.x;
+      b.vy = bt.y + n.y;
     }
 
-    public Vector getAnchoredVector(Ball b) {
-      final double angle = Math.atan2(vy, vx);
-      final double angleTo = Math.atan2(b.y - y, b.x - x);
-      final double vMag = Point.distance(0, 0, vx, vy);
-      // TODO: include b's velocity
-      final double tMag = Point.distance(x, y, b.x, b.y);
-      final double fMag = Math.cos(angle - angleTo) * Math.pow(vMag, 0.99) / tMag;
-      return new Vector((b.x - x) * fMag, (b.y - y) * fMag);
-    }
+    // public Vector getAnchoredVector(Ball b) {
+    //   final double angle = Math.atan2(vy, vx);
+    //   final double angleTo = Math.atan2(b.y - y, b.x - x);
+    //   final double vMag = Point.distance(0, 0, vx, vy);
+    //   // TODO: include b's velocity
+    //   final double tMag = Point.distance(x, y, b.x, b.y);
+    //   final double fMag = Math.cos(angle - angleTo) * Math.pow(vMag, 0.99) / tMag;
+    //   return new Vector((b.x - x) * fMag, (b.y - y) * fMag);
+    // }
 
     public double distanceTo(Ball b) {
       return Point.distance(x, y, b.x, b.y);
@@ -298,7 +347,8 @@ public class PoolGame extends JPanel {
     }
   }
 
-  public PoolGame(boolean isSandbox, boolean isAIOpponent) {
+  public PoolGame(Main main, boolean isSandbox, boolean isAIOpponent) {
+    this.main = main;
     this.isSandbox = isSandbox;
     this.isAIOpponent = isAIOpponent;
 
@@ -327,6 +377,10 @@ public class PoolGame extends JPanel {
       }
     });
     AITimer.setRepeats(true);
+  }
+
+  public void startIfNeeded() {
+    if (shouldStartTimer) updateTimer.start();
   }
 
   public void update() {
@@ -373,12 +427,13 @@ public class PoolGame extends JPanel {
         canMoveCue = true;
         gamestate = Gamestate.cuing;
         updateTimer.stop();
-        repaint();
 
         turn = !turn; // next turn
+        if (AI != null) AI.stick = null;
         if (turn && !isSandbox && isAIOpponent) AITimer.start();
 
         hasScored = false;
+        repaint();
         return;
       }
 
@@ -418,7 +473,7 @@ public class PoolGame extends JPanel {
     public void mouseDragged(MouseEvent e) {
       if (!isUserTurn()) return;
       final Point2D.Double mouse = getMousePoint(e);
-      final int where = whereClicked(mouse);
+      final int where = whereClicked(mouse, e.getPoint());
       if (gamestate == Gamestate.cuing && where == 0 && !cueMoving) {
         final double dist = lastMouse.distance(mouse);
         stickDrawback = Math.min(dist, maxDrawback);
@@ -438,7 +493,7 @@ public class PoolGame extends JPanel {
     public void mouseClicked(MouseEvent e) {
       if (!isUserTurn()) return;
       final Point2D.Double mouse = getMousePoint(e);
-      final int where = whereClicked(mouse);
+      final int where = whereClicked(mouse, e.getPoint());
       if (gamestate == Gamestate.cuing && where == 1) {
         gamestate = Gamestate.spinMenu;
       }
@@ -446,7 +501,7 @@ public class PoolGame extends JPanel {
     public void mousePressed(MouseEvent e) {
       if (!isUserTurn()) return;
       final Point2D.Double mouse = getMousePoint(e);
-      final int where = whereClicked(mouse);
+      final int where = whereClicked(mouse, e.getPoint());
       if (gamestate == Gamestate.spinMenu && where == 1) {
         setCueSpin(mouse);
         repaint();
@@ -455,12 +510,27 @@ public class PoolGame extends JPanel {
       }
     }
     public void mouseReleased(MouseEvent e) {
-      if (!isUserTurn()) return;
       final Point2D.Double mouse = getMousePoint(e);
+      final int where = whereClicked(mouse, e.getPoint());
+      if (where == 4) { // HOME MENU
+        shouldStartTimer = updateTimer.isRunning();
+        updateTimer.stop();
+        main.goToHome();
+      }
+      if (!isUserTurn()) return;
       lastMouse = mouse;
-      final int where = whereClicked(mouse);
       if (gamestate == Gamestate.cuing && stickDrawback > 0 && where == 0 && !cueMoving) {
+        // player shoots!
+        if (connection != null && connection.outputWriter != null) {
+          System.out.println("Sending packet to server!!!");
+          connection.outputWriter.println(new Connection.Packet(
+            new Point2D.Double(stickDX, stickDY),
+            new Point2D.Double(cueSpinX, cueSpinY),
+            stickDrawback
+          ));
+        }
         release();
+        AI.stick = null;
       } else if (gamestate == Gamestate.cuing & where != 0) {
         stickDrawback = 0;
       } else if (gamestate == Gamestate.spinMenu && where != 1) {
@@ -477,8 +547,10 @@ public class PoolGame extends JPanel {
       repaint();
     }
 
-    // normal = 0 | cueSpin = 1 | canel = 2 | cue = 3
-    public int whereClicked(Point2D.Double mouse) {
+    // normal = 0 | cueSpin = 1 | cancel = 2 | cue = 3 | home = 4
+    public int whereClicked(Point2D.Double mouse, Point originalMouse) {
+      //home
+      if (originalMouse.distance(getWidth()-28, 28) <= 28) return 4;
       // cueSpin
       if (mouse.distance(gamestate == Gamestate.spinMenu ? 0 : 840, 0) <= (gamestate == Gamestate.spinMenu ? 200 : 110)) return 1;
       if (mouse.x >= -930 && mouse.x < -770 && mouse.y >= -900 && mouse.y <= -740) return 2;
@@ -512,12 +584,31 @@ public class PoolGame extends JPanel {
     stickDrawback = 0; cueSpinX = 0; cueSpinY = 0;
   }
 
+  public class Multiplayer extends AI {
+    public Multiplayer() {
+      setDrawbackSpeed(800);
+    }
+
+    public void calculatePoint() {}
+  }
+
   public class AI {
-    Point2D.Double stick = null;
+    public Point2D.Double stick = null;
     double targetDrawback = 0, sX = 0, sY = 0;
     Ball eightBall = null;
 
-    private static final int drawbackSpeed = 400;
+    private static int drawbackSpeed = 400;
+    protected void setDrawbackSpeed(int speed) {
+      drawbackSpeed = speed;
+    }
+
+    public void setShot(Point2D.Double stick, Point2D.Double spin, double drawback) {
+      System.out.println("Setting shot... stick=" + stick + ", d" + drawback);
+      this.stick = stick;
+      stickDX = stick.x; stickDY = stick.y;
+      cueSpinX = spin.x; cueSpinY = spin.y;
+      targetDrawback = drawback;
+    }
 
     public void update(double dt) {
       if (stick != null && (stickDX != stick.x || stickDY != stick.y)) {
@@ -525,6 +616,7 @@ public class PoolGame extends JPanel {
         stickDY = stick.y;
       }
       if (stick == null) calculatePoint();
+      if (stick == null) return;
 
       gamestate = Gamestate.cuing;
 
@@ -567,8 +659,14 @@ public class PoolGame extends JPanel {
 
     // TODO: fix
     void AAA() {
+      int safe = 0;
       System.out.println("--> Last Resort! Calling AAA()");
-      for (double angle = 0; angle != 6.7; angle = (angle+0.2)%6.7) {
+
+      // arbitrary values !!!!
+      for (double angle = 0; angle <= 12; angle = angle+0.22) {
+        safe++;
+        if (checkSafe(safe, 100000)) return;
+
         stick = new Point2D.Double(Math.sin(angle), Math.cos(angle));
         stickDX = stick.x; stickDY = stick.y;
         // cueSpinY = 1;
@@ -579,8 +677,13 @@ public class PoolGame extends JPanel {
 
         // test sticking
         while (true) {
+          safe++;
+          if (checkSafe(safe, 100000)) return;
+
           boolean allStopped = true, collided = false;
           for (Ball b : balls) {
+            safe++;
+            if (checkSafe(safe, 100000)) return;
             if (b == cue) {
               final Ball collide = b.update(0.02);
               if (collide != null && (turn0IsSolid == null || collide.isStriped == turn0IsSolid)) {
@@ -596,10 +699,20 @@ public class PoolGame extends JPanel {
             if (collided) System.out.println("  Found one that collided! (θ = " + angle + ")");
             save.load();
             // if (cue.scored) cueSpinY = -1; //debug
-            if (collided) return; else break;
+            if (collided) return;
+            else break;
           }
         }
       }
+    }
+
+    boolean checkSafe(int safe, int limit) {
+      if (safe > limit) {
+        System.out.println("Loop safe check exceeded " + limit + "!");
+        // Thread.dumpStack();
+        return true;
+      }
+      return false;
     }
 
     Double bestShot(Ball b) {
@@ -758,7 +871,22 @@ public class PoolGame extends JPanel {
 
     drawGUI(g2);
 
+    // For multiplayer
+    if (isAIOpponent && AI != null && AI.getClass() == Multiplayer.class) {
+      if (turn && gamestate == Gamestate.cuing && AI.stick == null) {
+        g2.setColor(new Color(0, 0, 0, 64));
+        g2.setStroke(new BasicStroke(1));
+        g2.fillRect(-500, -200, 1000, 400);
+        g2.setColor(Color.WHITE);
+        g2.setFont(getFont().deriveFont(Font.BOLD, 48));
+        g2.drawString("Waiting for opponent...", -240, -12);
+      }
+    }
+
     g2.dispose();
+
+    // home button
+    g.drawImage(getImage("com/poolgame/images/home.png"), getWidth()-56, 8, this);
 
     // DEBUG:
     g.setColor(Color.WHITE);
@@ -869,6 +997,32 @@ public class PoolGame extends JPanel {
     PURPLE = new Color(100, 0, 160),
     RED = new Color(200, 0, 0);
 
+  public void resetGame() {
+    isSandbox = false;
+    hasScored = false;
+    turn0IsSolid = null;
+    player1Balls = new ArrayList<Ball>();
+    player2Balls = new ArrayList<Ball>();
+
+    gamestate = Gamestate.cuing;
+    AITimer.stop();
+    updateTimer.stop();
+    canMoveCue = true;
+    cueMoving = false;
+    cue = null;
+
+    initGame();
+
+    turn = false;
+  }
+
+  public void setIsAIOpponent(boolean isAIOpponent) {
+    this.isAIOpponent = isAIOpponent;
+    if (isAIOpponent && gamestate == Gamestate.cuing && turn) {
+      AITimer.start();
+    }
+  }
+
   public void initGame() {
     balls = new ArrayList<Ball>(16);
     cue = new Ball(new Color(240, 240, 240), false, -1, 0, 600);
@@ -903,5 +1057,19 @@ public class PoolGame extends JPanel {
   public Point2D.Double getMousePoint(MouseEvent e) {
     final double scale = getScaleFactor();
     return new Point2D.Double((e.getX() - getWidth()/2) / scale, (e.getY() - getHeight()/2) / scale);
+  }
+
+  static public Image getImage(String pathname) {
+    try {
+      return ImageIO.read(new File(pathname));
+    } catch (Exception e1) {
+      try {
+        return ImageIO.read(Panel.class.getResource(pathname));
+      } catch (Exception e2) {
+        // e1.printStackTrace();
+        // e2.printStackTrace();
+      }
+    }
+    return null;
   }
 }
